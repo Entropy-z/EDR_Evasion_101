@@ -1,9 +1,9 @@
 #include <Windows.h>
 #include <winternl.h>
 
-main(){
+int main(){
 
-    LPCSTR lpFileName = "C:\\Windows\\System32\\NTDLL.DLL";
+    LPCSTR lpFileName = "C:\\Windows\\System32\\ntdll.dll";
     
     PBYTE pNtdllUnhooked;
     PVOID dwTextAddressUnhooked;
@@ -21,14 +21,10 @@ main(){
     printf("[*] Retrieving Buffer from Ntdll...\n");
 
     if(!RetrieveBufferFileDisk(lpFileName, &pNtdllUnhooked)){
-        printf("[!] Error: %lu", GetLastError());
         return -1;
     }
-    printf("[+] Received bytes From NTDLL Unhooked in Disk.\n\n");
-    printf("[i] Getting .text section from NTDLL Unhooked...\n");
-
-    if(!GetTextSectionUnhooked(pNtdllUnhooked, &dwTextAddressUnhooked, &dwTextSizeUnhooked)){
-        printf("[!] Get .text section failed with error: %lu", GetLastError());
+    
+    if(!GetTextSectionUnhooked((PBYTE)pNtdllUnhooked, &dwTextAddressUnhooked, &dwTextSizeUnhooked)){
         return -1;
     }
     printf("\t[*] .text Address from Ntdll Unhooked: 0x%p\n", dwTextAddressUnhooked);
@@ -38,11 +34,9 @@ main(){
 
     FetchNtdllBaseAddresHooked(&pAddressNtdllHooked);
     if(pAddressNtdllHooked == INVALID_HANDLE_VALUE){
-        printf("[!] Error: %lu", GetLastError());
+        return -1;
     }
     printf("DONE\n");
-
-    printf("[i] Getting .text section from Ntdll Hooked...\n");
 
     GetTextSectionHooked(pAddressNtdllHooked, &pNtdllTxtHooked, &sNtdllTxtHooked);
 
@@ -59,61 +53,70 @@ main(){
     return 0;
 }
 
-BOOL RetrieveBufferFileDisk(IN LPCSTR lpFileName, OUT PVOID* pFileBuffer){
+BOOL RetrieveBufferFileDisk( _In_ LPCSTR ntdllName, _Out_ LPVOID* pNtdllImage) {
 
-    DWORD dwFileSize;
-    PVOID pFileBuff;
-    DWORD dwNumberOfBytesRead;
-    HANDLE hFile;
-
-    hFile = CreateFileA(lpFileName, GENERIC_READ, FILE_SHARE_READ , NULL, OPEN_EXISTING , FILE_ATTRIBUTE_NORMAL, NULL);
-    if(hFile == INVALID_HANDLE_VALUE){
+    HANDLE hNtdll = CreateFileA(ntdllName, GENERIC_READ , FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hNtdll == INVALID_HANDLE_VALUE) {
+        printf("[!] CreateFileA for ntdll unhooked failed with error: %lu\n", GetLastError());
+        goto _CLEANUP;
         return FALSE;
     }
 
-    dwFileSize = GetFileSize(hFile, NULL);
-    pFileBuff = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwFileSize);
+    DWORD ntdllSize = GetFileSize(hNtdll, NULL);
 
-	if (!ReadFile(hFile, pFileBuff, dwFileSize, &dwNumberOfBytesRead, NULL) || dwFileSize != dwNumberOfBytesRead) {
-		printf("[!] ReadFile Failed With Error : %d \n", GetLastError());
-		printf("[i] Read %d of %d Bytes \n", dwNumberOfBytesRead, dwFileSize);
-		return FALSE;
-	}
+    HANDLE hMapFile = CreateFileMappingA(hNtdll, NULL, PAGE_READONLY | SEC_IMAGE_NO_EXECUTE, 0, ntdllSize, NULL);
+    if (hMapFile == NULL) {
+        printf("\t[!] CreateFileMapping for ntdll unhooked failed with error: %lu\n", GetLastError());
+        goto _CLEANUP;
+        return FALSE;
+    }
 
-    *pFileBuffer = pFileBuff;
-
-    CloseHandle(hFile);
+    *pNtdllImage = MapViewOfFile(hMapFile, FILE_MAP_READ, 0, 0, 0);
+    if (*pNtdllImage == NULL) {
+        printf("\t[!] MapViewOfFile for ntdll unhooked failed with error: %lu\n", GetLastError());
+        goto _CLEANUP;
+        return FALSE;
+    }
+	printf("\t[*] Mapped Ntdll in memory at 0x%p\n", pNtdllImage);
     return TRUE;
+
+
+_CLEANUP:
+	if (hNtdll)
+		CloseHandle(hNtdll);
+    if (hMapFile)
+		CloseHandle(hMapFile);
+	if (*pNtdllImage == NULL)
+		return FALSE;
+	else
+		return TRUE;
 }
 
-BOOL GetTextSectionUnhooked(IN PBYTE pPE, OUT PVOID* pTextAddressUnhooked, OUT SIZE_T* szTextSizeUnhooked){
+BOOL GetTextSectionUnhooked(_In_ PBYTE pPE, _Out_ PVOID* pTextAddressUnhooked, _Out_ SIZE_T* szTextSizeUnhooked){
 
     PVOID textAddress;
     SIZE_T textSize;
 
     PIMAGE_DOS_HEADER pImageDosHdr = (PIMAGE_DOS_HEADER)pPE;
+    if (pImageDosHdr->e_magic != IMAGE_DOS_SIGNATURE){
+        printf("[!] Invalid DOS Signature at unhooked ntdll");
+		return FALSE;
+    }
+
     PIMAGE_NT_HEADERS pImageNtHdrs = (PIMAGE_NT_HEADERS)((PBYTE)pPE + pImageDosHdr->e_lfanew);
+    
     PIMAGE_SECTION_HEADER pImageSectionHdr = (PIMAGE_SECTION_HEADER)(((PBYTE)pImageNtHdrs) + sizeof(IMAGE_NT_HEADERS));
 
     textAddress = (PVOID)(pImageNtHdrs->OptionalHeader.BaseOfCode + (ULONG_PTR)pPE);
     textSize = pImageNtHdrs->OptionalHeader.SizeOfCode;
-/*
-    for (int i = 0; i < pImageNtHdrs->FileHeader.NumberOfSections; i++) {
-        if (strcmp((char*)pImageSectionHdr[i].Name, ".text") == 0) {
-            textAddress = pImageSectionHdr[i].VirtualAddress;
-            textSize = pImageSectionHdr[i].Misc.VirtualSize;
 
-            break;  
-        }
-    }
-*/
     *pTextAddressUnhooked = textAddress;
     *szTextSizeUnhooked = textSize;
 
     return TRUE;
 }
 
-BOOL FetchNtdllBaseAddresHooked(OUT PVOID* pDllBase ){
+BOOL FetchNtdllBaseAddresHooked(_Out_ PVOID* pDllBase){
 
 #ifdef _WIN64
 	PPEB pPEB = (PPEB)__readgsqword(0x60);
@@ -129,7 +132,7 @@ BOOL FetchNtdllBaseAddresHooked(OUT PVOID* pDllBase ){
 
 }
 
-BOOL GetTextSectionHooked(IN PVOID pLocalNtdll, OUT PVOID* pNtdllHookedTxt, OUT SIZE_T* sNtdllHookedTxtSz){
+BOOL GetTextSectionHooked(_In_ PVOID pLocalNtdll, _Out_ PVOID* pNtdllHookedTxt, _Out_ SIZE_T* sNtdllHookedTxtSz){
     PIMAGE_DOS_HEADER	pLocalDosHdr	= (PIMAGE_DOS_HEADER)pLocalNtdll;
     if (pLocalDosHdr->e_magic != IMAGE_DOS_SIGNATURE)
         return FALSE;
@@ -156,10 +159,8 @@ BOOL ReplaceNtdll(IN PVOID pTextOriginalNtdll, SIZE_T sTextOriginalNtdll, IN PVO
 		return FALSE;
 	}
 
-	// copying the new text section 
 	memcpy(pTextOriginalNtdll, pTextUnhookedNtdll, sTextOriginalNtdll);
 	
-	// rrestoring the old memory protection
 	if (!VirtualProtect(pTextOriginalNtdll, sTextOriginalNtdll, dwOldProtection, &dwOldProtection)) {
 		printf("[!] VirtualProtect [2] Failed With Error : %d \n", GetLastError());
 		return FALSE;
